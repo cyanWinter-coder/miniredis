@@ -1,12 +1,10 @@
 package miniredis
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"math/big"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/alicebob/miniredis/v2/server"
@@ -110,7 +108,7 @@ func withTx(
 	if ctx.nested {
 		// this is a call via Lua's .call(). It's already locked.
 		cb(c, ctx)
-		m.signal.Broadcast()
+		m.wakeWaitersLocked()
 		return
 	}
 
@@ -122,12 +120,79 @@ func withTx(
 	m.Lock()
 	cb(c, ctx)
 	// done, wake up anyone who waits on anything.
-	m.signal.Broadcast()
+	m.wakeWaitersLocked()
 	m.Unlock()
 }
 
 // blockCmd is executed returns whether it is done
 type blockCmd func(*server.Peer, *connCtx) bool
+
+// waitState is the state of a blocking wait. Every wait ends in exactly one
+// of the terminal states.
+type waitState int
+
+const (
+	waitPending   waitState = iota // still waiting
+	waitDelivered                  // a push delivered a result
+	waitTimeout                    // the wait timed out
+	waitCancelled                  // the client connection went away
+	waitShutdown                   // the server was closed
+)
+
+// blockWaiter is a single client blocked in BLPOP, XREAD BLOCK, and friends.
+type blockWaiter struct {
+	peer  *server.Peer
+	ctx   *connCtx
+	cb    blockCmd
+	state waitState     // guarded by the Miniredis lock
+	wake  chan struct{} // closed once state leaves waitPending
+}
+
+// resolveWaiterLocked moves a waiter to a terminal state and drops it from
+// the queue. Only the first call for a waiter has an effect: a waiter is
+// unblocked exactly once.
+func (m *Miniredis) resolveWaiterLocked(w *blockWaiter, st waitState) {
+	if w.state != waitPending {
+		return
+	}
+	w.state = st
+	for i, x := range m.waiters {
+		if x == w {
+			m.waiters = append(m.waiters[:i], m.waiters[i+1:]...)
+			break
+		}
+	}
+	close(w.wake)
+}
+
+// wakeWaitersLocked gives every pending waiter a chance to consume, in the
+// order they started waiting. Waiters whose connection went away are dropped
+// from the queue, so a push is never delivered to a gone client.
+func (m *Miniredis) wakeWaitersLocked() {
+	// A delivered waiter can push to a key itself (BLMOVE &c.), which can
+	// unblock a waiter earlier in the queue. Repeat until no progress.
+	for len(m.waiters) > 0 {
+		// resolving mutates m.waiters, so iterate over a copy.
+		queue := append([]*blockWaiter(nil), m.waiters...)
+		progress := false
+		for _, w := range queue {
+			if w.state != waitPending {
+				continue
+			}
+			if w.peer.Closed() {
+				m.resolveWaiterLocked(w, waitCancelled)
+				continue
+			}
+			if w.cb(w.peer, w.ctx) {
+				m.resolveWaiterLocked(w, waitDelivered)
+				progress = true
+			}
+		}
+		if !progress {
+			return
+		}
+	}
+}
 
 // blocking keeps trying a command until the callback returns true. Calls
 // onTimeout after the timeout (or when we call this in a transaction).
@@ -138,9 +203,7 @@ func blocking(
 	cb blockCmd,
 	onTimeout func(*server.Peer),
 ) {
-	var (
-		ctx = getCtx(c)
-	)
+	ctx := getCtx(c)
 	if inTx(ctx) {
 		addTxCmd(ctx, func(c *server.Peer, ctx *connCtx) {
 			if !cb(c, ctx) {
@@ -151,55 +214,68 @@ func blocking(
 		return
 	}
 
-	localCtx, cancel := context.WithCancel(m.Ctx)
-	defer cancel()
-	timedOut := false
-	if timeout != 0 {
-		go setCondTimer(localCtx, m.signal, &timedOut, timeout)
+	if ctx.nested {
+		// this is a call via Lua's .call(). It's already locked, and never
+		// blocks.
+		if !cb(c, ctx) {
+			onTimeout(c)
+		}
+		return
 	}
+
+	m.Lock()
+	if c.Closed() || m.Ctx.Err() != nil {
+		// the connection is gone, or the server is closed: no new waits
+		m.Unlock()
+		return
+	}
+	if cb(c, ctx) {
+		// didn't block. BLMOVE &c. push to a key themselves, which can
+		// unblock a waiter.
+		m.wakeWaitersLocked()
+		m.Unlock()
+		return
+	}
+	w := &blockWaiter{
+		peer: c,
+		ctx:  ctx,
+		cb:   cb,
+		wake: make(chan struct{}),
+	}
+	m.waiters = append(m.waiters, w)
+	m.Unlock()
+
+	var timer *time.Timer
+	if timeout != 0 {
+		timer = time.AfterFunc(timeout, func() {
+			m.Lock()
+			m.resolveWaiterLocked(w, waitTimeout)
+			m.Unlock()
+		})
+		defer timer.Stop()
+	}
+	// cancel the wait when the client goes away or the server closes.
 	go func() {
-		<-localCtx.Done()
-		m.signal.Broadcast() // main loop might miss this signal
+		select {
+		case <-c.Done():
+			m.Lock()
+			m.resolveWaiterLocked(w, waitCancelled)
+			m.Unlock()
+		case <-m.Ctx.Done():
+			m.Lock()
+			m.resolveWaiterLocked(w, waitShutdown)
+			m.Unlock()
+		case <-w.wake:
+		}
 	}()
 
-	if !ctx.nested {
-		// this is a call via Lua's .call(). It's already locked.
-		m.Lock()
-		defer m.Unlock()
-	}
-	for {
-		if c.Closed() {
-			return
-		}
+	<-w.wake
 
-		if m.Ctx.Err() != nil {
-			return
-		}
-
-		done := cb(c, ctx)
-		if done {
-			return
-		}
-
-		if timedOut {
-			onTimeout(c)
-			return
-		}
-
-		m.signal.Wait()
-	}
-}
-
-func setCondTimer(ctx context.Context, sig *sync.Cond, timedOut *bool, timeout time.Duration) {
-	dl := time.NewTimer(timeout)
-	defer dl.Stop()
-	select {
-	case <-dl.C:
-		sig.L.Lock() // for timedOut
-		*timedOut = true
-		sig.Broadcast() // main loop might miss this signal
-		sig.L.Unlock()
-	case <-ctx.Done():
+	m.Lock()
+	st := w.state
+	m.Unlock()
+	if st == waitTimeout {
+		onTimeout(c)
 	}
 }
 

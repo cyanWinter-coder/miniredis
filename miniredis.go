@@ -65,10 +65,10 @@ type Miniredis struct {
 	dbs         map[int]*RedisDB
 	selectedDB  int               // DB id used in the direct Get(), Set() &c.
 	scripts     map[string]string // sha1 -> lua src
-	signal      *sync.Cond
-	now         time.Time // time.Now() if not set.
-	clockTTL    bool      // decrease TTLs as the clock advances
-	lastTick    time.Time // last time TTLs were advanced, if clockTTL is set
+	waiters     []*blockWaiter    // pending blocking commands, in wait order
+	now         time.Time         // time.Now() if not set.
+	clockTTL    bool              // decrease TTLs as the clock advances
+	lastTick    time.Time         // last time TTLs were advanced, if clockTTL is set
 	subscribers map[*Subscriber]struct{}
 	rand        *rand.Rand
 	Ctx         context.Context
@@ -104,7 +104,6 @@ func NewMiniRedis() *Miniredis {
 		subscribers: map[*Subscriber]struct{}{},
 	}
 	m.Ctx, m.CtxCancel = context.WithCancel(context.Background())
-	m.signal = sync.NewCond(&m)
 	return &m
 }
 
@@ -221,6 +220,9 @@ func (m *Miniredis) startLocked(s *server.Server) error {
 	m.srv = s
 	s.SetPreHook(m.nextPreHook)
 	m.nextPreHook = nil
+	// a fresh lifetime for this run: a Close()d and Restart()ed server must
+	// accept new blocking waits again.
+	m.Ctx, m.CtxCancel = context.WithCancel(context.Background())
 	if a := s.Addr(); a != nil {
 		m.ip = a.IP.String()
 		m.port = a.Port
@@ -294,6 +296,11 @@ func (m *Miniredis) Close() {
 	srv := m.srv
 	m.srv = nil
 	m.CtxCancel()
+	// unblock all pending blocking commands; their results, if any were
+	// already delivered, stay delivered.
+	for _, w := range append([]*blockWaiter(nil), m.waiters...) {
+		m.resolveWaiterLocked(w, waitShutdown)
+	}
 	m.Unlock()
 
 	// the OnDisconnect callbacks can lock m, so run Close() outside the lock.

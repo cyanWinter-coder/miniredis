@@ -77,7 +77,7 @@ func (m *Miniredis) cmdExec(c *server.Peer, cmd string, args []string) {
 		cb(c, ctx)
 	}
 	// wake up anyone who waits on anything.
-	m.signal.Broadcast()
+	m.wakeWaitersLocked()
 
 	stopTx(ctx)
 }

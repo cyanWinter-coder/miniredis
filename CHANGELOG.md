@@ -1,6 +1,14 @@
 ## Changelog
 
 
+## Unreleased
+
+- rework blocking commands (BLPOP &c., XREAD BLOCK): waits are queued in
+  order, end in exactly one of delivered/timeout/cancelled/shutdown, and are
+  cancelled promptly when the client disconnects or the server closes
+- fix blocking commands never replying after a Close()+Restart()
+
+
 ## v2.40.0
 
 - support testing/synctest (thanks @alexluong)

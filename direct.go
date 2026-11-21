@@ -52,7 +52,7 @@ func (db *RedisDB) Keys() []string {
 func (m *Miniredis) FlushAll() {
 	m.Lock()
 	defer m.Unlock()
-	defer m.signal.Broadcast()
+	defer m.wakeWaitersLocked()
 
 	m.flushAll()
 }
@@ -72,7 +72,7 @@ func (m *Miniredis) FlushDB() {
 func (db *RedisDB) FlushDB() {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	db.flush()
 }
@@ -106,7 +106,7 @@ func (m *Miniredis) Set(k, v string) error {
 func (db *RedisDB) Set(k, v string) error {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	if db.exists(k) && db.t(k) != keyTypeString {
 		return ErrWrongType
@@ -125,7 +125,7 @@ func (m *Miniredis) Incr(k string, delta int) (int, error) {
 func (db *RedisDB) Incr(k string, delta int) (int, error) {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	if db.exists(k) && db.t(k) != keyTypeString {
 		return 0, ErrWrongType
@@ -149,7 +149,7 @@ func (m *Miniredis) Incrfloat(k string, delta float64) (float64, error) {
 func (db *RedisDB) Incrfloat(k string, delta float64) (float64, error) {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	if db.exists(k) && db.t(k) != keyTypeString {
 		return 0, ErrWrongType
@@ -195,7 +195,7 @@ func (m *Miniredis) Lpush(k, v string) (int, error) {
 func (db *RedisDB) Lpush(k, v string) (int, error) {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	if db.exists(k) && db.t(k) != keyTypeList {
 		return 0, ErrWrongType
@@ -212,7 +212,7 @@ func (m *Miniredis) Lpop(k string) (string, error) {
 func (db *RedisDB) Lpop(k string) (string, error) {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	if !db.exists(k) {
 		return "", ErrKeyNotFound
@@ -238,7 +238,7 @@ func (m *Miniredis) Push(k string, v ...string) (int, error) {
 func (db *RedisDB) Push(k string, v ...string) (int, error) {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	if db.exists(k) && db.t(k) != keyTypeList {
 		return 0, ErrWrongType
@@ -260,7 +260,7 @@ func (m *Miniredis) Pop(k string) (string, error) {
 func (db *RedisDB) Pop(k string) (string, error) {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	if !db.exists(k) {
 		return "", ErrKeyNotFound
@@ -287,7 +287,7 @@ func (m *Miniredis) SetAdd(k string, elems ...string) (int, error) {
 func (db *RedisDB) SetAdd(k string, elems ...string) (int, error) {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	if db.exists(k) && db.t(k) != keyTypeSet {
 		return 0, ErrWrongType
@@ -373,7 +373,7 @@ func (m *Miniredis) Del(k string) bool {
 func (db *RedisDB) Del(k string) bool {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	if !db.exists(k) {
 		return false
@@ -421,7 +421,7 @@ func (m *Miniredis) SetTTL(k string, ttl time.Duration) {
 func (db *RedisDB) SetTTL(k string, ttl time.Duration) {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	db.ttl[k] = ttl
 	db.incr(k)
@@ -485,7 +485,7 @@ func (m *Miniredis) HSet(k string, fv ...string) {
 func (db *RedisDB) HSet(k string, fv ...string) {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	db.hashSet(k, fv...)
 	// Setting a field removes its TTL, as with HSET.
@@ -503,7 +503,7 @@ func (m *Miniredis) HExpire(key, field string, ttl time.Duration) bool {
 func (db *RedisDB) HExpire(key, field string, ttl time.Duration) bool {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	if !db.exists(key) || db.t(key) != keyTypeHash {
 		return false
@@ -527,7 +527,7 @@ func (m *Miniredis) HPersist(key, field string) bool {
 func (db *RedisDB) HPersist(key, field string) bool {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	fieldTTLs := db.hashTTLs[key]
 	if fieldTTLs == nil {
@@ -566,7 +566,7 @@ func (m *Miniredis) HSetEX(key string, ttl time.Duration, fv ...string) {
 func (db *RedisDB) HSetEX(key string, ttl time.Duration, fv ...string) {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	db.hashSet(key, fv...)
 	if db.hashTTLs[key] == nil {
@@ -586,7 +586,7 @@ func (m *Miniredis) HDel(k, f string) {
 func (db *RedisDB) HDel(k, f string) {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	db.hdel(k, f)
 }
@@ -614,7 +614,7 @@ func (m *Miniredis) HIncr(k, f string, delta int) (int, error) {
 func (db *RedisDB) HIncr(k, f string, delta int) (int, error) {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	return db.hashIncr(k, f, delta)
 }
@@ -633,7 +633,7 @@ func (m *Miniredis) HIncrfloat(k, f string, delta float64) (float64, error) {
 func (db *RedisDB) HIncrfloat(k, f string, delta float64) (float64, error) {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	v, err := db.hashIncrfloat(k, f, big.NewFloat(delta))
 	if err != nil {
@@ -652,7 +652,7 @@ func (m *Miniredis) SRem(k string, fields ...string) (int, error) {
 func (db *RedisDB) SRem(k string, fields ...string) (int, error) {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	if !db.exists(k) {
 		return 0, ErrKeyNotFound
@@ -672,7 +672,7 @@ func (m *Miniredis) ZAdd(k string, score float64, member string) (bool, error) {
 func (db *RedisDB) ZAdd(k string, score float64, member string) (bool, error) {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	if db.exists(k) && db.t(k) != keyTypeSortedSet {
 		return false, ErrWrongType
@@ -727,7 +727,7 @@ func (m *Miniredis) ZRem(k, member string) (bool, error) {
 func (db *RedisDB) ZRem(k, member string) (bool, error) {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	if !db.exists(k) {
 		return false, ErrKeyNotFound
@@ -788,7 +788,7 @@ func (m *Miniredis) XAdd(k string, id string, values []string) (string, error) {
 func (db *RedisDB) XAdd(k string, id string, values []string) (string, error) {
 	db.master.Lock()
 	defer db.master.Unlock()
-	defer db.master.signal.Broadcast()
+	defer db.master.wakeWaitersLocked()
 
 	s, err := db.stream(k)
 	if err != nil {

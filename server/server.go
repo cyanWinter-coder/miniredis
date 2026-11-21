@@ -289,6 +289,7 @@ func (s *Server) TotalConnections() int {
 type Peer struct {
 	w            *bufio.Writer
 	closed       bool
+	closedCh     chan struct{} // closed when the peer is closed, lazily created by Done()
 	Resp3        bool
 	SwitchResp3  *bool       // we'll switch to this version _after_ the command
 	Ctx          interface{} // anything goes, server won't touch this
@@ -315,6 +316,13 @@ func (c *Peer) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closed = true
+	if c.closedCh != nil {
+		select {
+		case <-c.closedCh:
+		default:
+			close(c.closedCh)
+		}
+	}
 }
 
 // Return true if the peer connection closed.
@@ -322,6 +330,21 @@ func (c *Peer) Closed() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.closed
+}
+
+// Done returns a channel which is closed once the peer is closed. It can be
+// used to abort command handling which outlives a single reply, such as
+// blocking commands.
+func (c *Peer) Done() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closedCh == nil {
+		c.closedCh = make(chan struct{})
+		if c.closed {
+			close(c.closedCh)
+		}
+	}
+	return c.closedCh
 }
 
 // Register a function to execute on disconnect. There can be multiple
