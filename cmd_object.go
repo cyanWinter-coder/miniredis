@@ -45,6 +45,6 @@ func (m *Miniredis) cmdObjectIdletime(c *server.Peer, args []string) {
 			return
 		}
 
-		c.WriteInt(int(db.master.effectiveNow().Sub(t).Seconds()))
+		c.WriteInt(int(db.master.txNowLocked().Sub(t).Seconds()))
 	})
 }

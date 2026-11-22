@@ -20,7 +20,7 @@ var (
 func (db *RedisDB) exists(k string) bool {
 	_, ok := db.keys[k]
 	if ok {
-		db.lru[k] = db.master.effectiveNow()
+		db.lru[k] = db.master.txNowLocked()
 	}
 	return ok
 }
@@ -32,7 +32,7 @@ func (db *RedisDB) t(k string) string {
 
 // incr increases the version and the lru timestamp
 func (db *RedisDB) incr(k string) {
-	db.lru[k] = db.master.effectiveNow()
+	db.lru[k] = db.master.txNowLocked()
 	db.keyVersion[k]++
 }
 
@@ -865,7 +865,8 @@ func (db *RedisDB) hllMerge(keys []string) error {
 
 	var destHll *hll
 	if db.exists(destKey) {
-		destHll = db.hllKeys[destKey]
+		// Merge into a copy, so a failure leaves the original intact.
+		destHll = db.hllKeys[destKey].copy()
 	} else {
 		destHll = newHll()
 	}

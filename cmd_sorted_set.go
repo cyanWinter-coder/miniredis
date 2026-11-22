@@ -1499,6 +1499,12 @@ func (m *Miniredis) cmdZunionstore(c *server.Peer, cmd string, args []string) {
 
 	withTx(m, c, func(c *server.Peer, ctx *connCtx) {
 		db := m.db(ctx.selectedDB)
+
+		sset, err := executeZUnion(db, opts)
+		if err != nil {
+			c.WriteError(err.Error())
+			return
+		}
 		deleteDest := true
 		for _, key := range keys {
 			if destination == key {
@@ -1507,12 +1513,6 @@ func (m *Miniredis) cmdZunionstore(c *server.Peer, cmd string, args []string) {
 		}
 		if deleteDest {
 			db.del(destination, true)
-		}
-
-		sset, err := executeZUnion(db, opts)
-		if err != nil {
-			c.WriteError(err.Error())
-			return
 		}
 		if sset.card() > 0 {
 			db.ssetSet(destination, sset)

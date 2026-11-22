@@ -1,6 +1,17 @@
 ## Changelog
 
 
+## Unreleased
+
+- transactions run at a fixed logical time: a key can't expire while EXEC is
+  running, and with ClockTTL the clock tick pauses during EXEC
+- a command which fails inside EXEC is rolled back completely (values, TTLs and
+  key versions), so it doesn't advance a WATCH version or leave a partial write
+- fix commands that changed the database before reporting an error (BITOP NOT,
+  RESTORE with a bad TTL, XADD with an invalid ID, ZUNIONSTORE, PFMERGE and
+  DELEX argument errors)
+
+
 ## v2.40.0
 
 - support testing/synctest (thanks @alexluong)

@@ -103,10 +103,33 @@ func (m *Miniredis) cmdXadd(c *server.Peer, cmd string, args []string) {
 				c.WriteNull()
 				return
 			}
-			s, _ = db.newStream(key)
+			// Add to a fresh stream first, so an invalid ID or entry doesn't
+			// leave an empty stream behind.
+			fresh := newStreamKey()
+			newID, err := fresh.add(entryID, values, m.txNowLocked())
+			if err != nil {
+				switch err {
+				case errInvalidEntryID:
+					c.WriteError(msgInvalidStreamID)
+				default:
+					c.WriteError(err.Error())
+				}
+				return
+			}
+			if maxlen >= 0 {
+				fresh.trim(maxlen)
+			}
+			if minID != "" {
+				fresh.trimBefore(minID)
+			}
+			db.keys[key] = keyTypeStream
+			db.streamKeys[key] = fresh
+			db.incr(key)
+			c.WriteBulk(newID)
+			return
 		}
 
-		newID, err := s.add(entryID, values, m.effectiveNow())
+		newID, err := s.add(entryID, values, m.txNowLocked())
 		if err != nil {
 			switch err {
 			case errInvalidEntryID:
@@ -654,7 +677,7 @@ func (m *Miniredis) sinceMilli(t time.Time) int {
 	if t.IsZero() {
 		return -1
 	}
-	return int(m.effectiveNow().Sub(t).Milliseconds())
+	return int(m.txNowLocked().Sub(t).Milliseconds())
 }
 
 // XREADGROUP
@@ -753,7 +776,7 @@ parsing:
 				opts.streams,
 				opts.ids,
 				opts.count,
-				m.effectiveNow(),
+				m.txNowLocked(),
 			)
 			if err != nil {
 				c.WriteError(err.Error())
@@ -778,7 +801,7 @@ parsing:
 				opts.streams,
 				opts.ids,
 				opts.count,
-				m.effectiveNow(),
+				m.txNowLocked(),
 			)
 			if err != nil {
 				c.WriteError(err.Error())
@@ -1235,7 +1258,7 @@ func (m *Miniredis) cmdXpending(c *server.Peer, cmd string, args []string) {
 			writeXpendingSummary(c, *g)
 			return
 		}
-		writeXpending(m.effectiveNow(), c, *g, opts.idle, opts.start, opts.end, opts.count, opts.consumer)
+		writeXpending(m.txNowLocked(), c, *g, opts.idle, opts.start, opts.end, opts.count, opts.consumer)
 	})
 }
 
@@ -1523,7 +1546,7 @@ parsing:
 			return
 		}
 
-		nextCallId, entries, deleted := xautoclaim(m.effectiveNow(), g, opts.minIdleTime, opts.start, opts.count, opts.consumer)
+		nextCallId, entries, deleted := xautoclaim(m.txNowLocked(), g, opts.minIdleTime, opts.start, opts.count, opts.consumer)
 		writeXautoclaim(c, nextCallId, entries, deleted, opts.justId)
 	})
 }
@@ -1634,7 +1657,7 @@ func (m *Miniredis) cmdXclaim(c *server.Peer, cmd string, args []string) {
 	}
 	opts.minIdleTime = time.Millisecond * time.Duration(minIdleTimeMillis)
 
-	opts.newLastDelivery = m.effectiveNow()
+	opts.newLastDelivery = m.txNowLocked()
 	opts.ids = append(opts.ids, args[4])
 
 	args = args[5:]
@@ -1664,7 +1687,7 @@ func (m *Miniredis) cmdXclaim(c *server.Peer, cmd string, args []string) {
 			if idleMs < 0 {
 				idleMs = 0
 			}
-			opts.newLastDelivery = m.effectiveNow().Add(time.Millisecond * time.Duration(-idleMs))
+			opts.newLastDelivery = m.txNowLocked().Add(time.Millisecond * time.Duration(-idleMs))
 			args = args[2:]
 		case "TIME":
 			timeMs, err := strconv.ParseInt(args[1], 10, 64)
@@ -1734,7 +1757,7 @@ func (m *Miniredis) xclaim(
 			continue
 		}
 		if pelEntry == nil {
-			group.setLastSeen(consumerName, m.effectiveNow())
+			group.setLastSeen(consumerName, m.txNowLocked())
 			if !force {
 				continue
 			}
@@ -1751,7 +1774,7 @@ func (m *Miniredis) xclaim(
 				consumer:      consumerName,
 				deliveryCount: 1,
 			}
-			group.setLastSuccess(consumerName, m.effectiveNow())
+			group.setLastSuccess(consumerName, m.txNowLocked())
 		} else {
 			group.consumers[pelEntry.consumer].numPendingEntries--
 			pelEntry.consumer = consumerName
@@ -1767,7 +1790,7 @@ func (m *Miniredis) xclaim(
 		claimedEntryIDs = append(claimedEntryIDs, id)
 	}
 	if len(claimedEntryIDs) == 0 {
-		group.setLastSeen(consumerName, m.effectiveNow())
+		group.setLastSeen(consumerName, m.txNowLocked())
 		return
 	}
 
@@ -1777,7 +1800,7 @@ func (m *Miniredis) xclaim(
 	consumer := group.consumers[consumerName]
 	consumer.numPendingEntries += len(claimedEntryIDs)
 
-	group.setLastSuccess(consumerName, m.effectiveNow())
+	group.setLastSuccess(consumerName, m.txNowLocked())
 	return
 }
 

@@ -141,7 +141,7 @@ func (m *Miniredis) cmdTime(c *server.Peer, cmd string, args []string) {
 	}
 
 	withTx(m, c, func(c *server.Peer, ctx *connCtx) {
-		now := m.effectiveNow()
+		now := m.txNowLocked()
 		nanos := now.UnixNano()
 		seconds := nanos / 1_000_000_000
 		microseconds := (nanos / 1_000) % 1_000_000

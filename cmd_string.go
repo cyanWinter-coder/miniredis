@@ -880,6 +880,7 @@ func (m *Miniredis) cmdBitop(c *server.Peer, cmd string, args []string) {
 	withTx(m, c, func(c *server.Peer, ctx *connCtx) {
 		db := m.db(ctx.selectedDB)
 
+		var result []byte
 		switch opts.op {
 		case "AND", "OR", "XOR":
 			first := opts.input[0]
@@ -887,7 +888,7 @@ func (m *Miniredis) cmdBitop(c *server.Peer, cmd string, args []string) {
 				c.WriteError(msgWrongType)
 				return
 			}
-			res := []byte(db.stringKeys[first])
+			result = []byte(db.stringKeys[first])
 			for _, vk := range opts.input[1:] {
 				if t, ok := db.keys[vk]; ok && t != keyTypeString {
 					c.WriteError(msgWrongType)
@@ -899,15 +900,8 @@ func (m *Miniredis) cmdBitop(c *server.Peer, cmd string, args []string) {
 					"OR":  func(a, b byte) byte { return a | b },
 					"XOR": func(a, b byte) byte { return a ^ b },
 				}[opts.op]
-				res = sliceBinOp(cb, res, []byte(v))
+				result = sliceBinOp(cb, result, []byte(v))
 			}
-			db.del(opts.target, true)
-			if len(res) == 0 {
-				db.del(opts.target, true)
-			} else {
-				db.stringSet(opts.target, string(res))
-			}
-			c.WriteInt(len(res))
 		case "NOT":
 			// NOT only takes a single argument.
 			if len(opts.input) != 1 {
@@ -919,20 +913,22 @@ func (m *Miniredis) cmdBitop(c *server.Peer, cmd string, args []string) {
 				c.WriteError(msgWrongType)
 				return
 			}
-			value := []byte(db.stringKeys[key])
-			for i := range value {
-				value[i] = ^value[i]
+			result = []byte(db.stringKeys[key])
+			for i := range result {
+				result[i] = ^result[i]
 			}
-			db.del(opts.target, true)
-			if len(value) == 0 {
-				db.del(opts.target, true)
-			} else {
-				db.stringSet(opts.target, string(value))
-			}
-			c.WriteInt(len(value))
 		default:
 			c.WriteError(msgSyntaxError)
+			return
 		}
+
+		// Only touch the destination once the result is known, so a failed
+		// BITOP leaves it alone.
+		db.del(opts.target, true)
+		if len(result) != 0 {
+			db.stringSet(opts.target, string(result))
+		}
+		c.WriteInt(len(result))
 	})
 }
 
@@ -1145,6 +1141,12 @@ func (m *Miniredis) cmdDelex(c *server.Peer, cmd string, args []string) {
 		return
 	}
 
+	// A bad invocation must not change anything, not even in a transaction.
+	argErr := func(msg string) {
+		setDirty(c)
+		c.WriteError(msg)
+	}
+
 	var opts struct {
 		key        string
 		opEQ       bool
@@ -1153,7 +1155,7 @@ func (m *Miniredis) cmdDelex(c *server.Peer, cmd string, args []string) {
 
 	// Parse arguments
 	if len(args) != 1 && len(args) != 3 {
-		c.WriteError(errWrongNumber("delex"))
+		argErr(errWrongNumber("delex"))
 		return
 	}
 
@@ -1168,10 +1170,10 @@ func (m *Miniredis) cmdDelex(c *server.Peer, cmd string, args []string) {
 		case "IFNE":
 			opts.opEQ = false // well doh
 		case "IFDEQ", "IFDNE":
-			c.WriteError("ERR unsupported condition for DELEX: " + condition)
+			argErr("ERR unsupported condition for DELEX: " + condition)
 			return
 		default:
-			c.WriteError("Invalid condition. Use IFEQ, IFNE, IFDEQ, or IFDNE")
+			argErr("Invalid condition. Use IFEQ, IFNE, IFDEQ, or IFDNE")
 			return
 		}
 	}

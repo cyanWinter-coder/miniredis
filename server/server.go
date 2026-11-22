@@ -236,6 +236,7 @@ func (s *Server) Dispatch(c *Peer, args []string) {
 	s.mu.Lock()
 	s.infoCmds++
 	s.mu.Unlock()
+	c.ResetError()
 	cmdMeta.handler(c, cmdUp, args)
 	if c.SwitchResp3 != nil {
 		c.Resp3 = *c.SwitchResp3
@@ -295,6 +296,7 @@ type Peer struct {
 	onDisconnect []func()    // list of callbacks
 	mu           sync.Mutex  // for Block()
 	ClientName   string      // client name set by CLIENT SETNAME
+	replyErr     bool        // an error was written since the last ResetError()
 }
 
 func NewPeer(w *bufio.Writer) *Peer {
@@ -308,6 +310,23 @@ func (c *Peer) Flush() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.w.Flush()
+}
+
+// ResetError forgets whether an error was written. It is called before a
+// command runs, so Failed() tells whether that command failed.
+func (c *Peer) ResetError() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.replyErr = false
+}
+
+// Failed tells whether a command has written an error reply since the last
+// ResetError(). It lets a caller run a command, or a transaction, and undo
+// its work unless it ended successfully.
+func (c *Peer) Failed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.replyErr
 }
 
 // Close the client connection after the current command is done.
@@ -339,9 +358,10 @@ func (c *Peer) Block(f func(*Writer)) {
 
 // WriteError writes a redis 'Error'
 func (c *Peer) WriteError(e string) {
-	c.Block(func(w *Writer) {
-		w.WriteError(e)
-	})
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.replyErr = true
+	(&Writer{c.w, c.Resp3}).WriteError(e)
 }
 
 // WriteInline writes a redis inline string

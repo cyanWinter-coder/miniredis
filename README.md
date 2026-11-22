@@ -274,6 +274,20 @@ Miniredis-level accessor. Combined with SetTime() the expiry stays coherent
 with TIME and (P)EXPIREAT. Note that against the wall clock this makes expiry
 depend on test execution speed, which is why it's not the default.
 
+## transactions and the clock
+
+A transaction (`MULTI`/`EXEC`) runs at a single fixed logical time: the
+commands see the clock as it was when `EXEC` started, so a key can't expire
+halfway through the transaction. Expiry which is already due is applied when
+`EXEC` starts. With `ClockTTL` the clock tick is also paused for the duration
+of `EXEC`, and resumes afterwards as if it had run.
+
+Every command in a transaction is atomic. A command which fails is rolled back
+completely — its writes, TTL changes and key version bumps — and keeps only its
+error reply. A failed command therefore doesn't advance the version `WATCH`
+observes, and the key versions used by the `EXEC` check are the same ones the
+committed result gets.
+
 ## testing/synctest
 
 miniredis works inside a `testing/synctest` bubble (Go 1.25+). Since real TCP

@@ -69,6 +69,7 @@ type Miniredis struct {
 	now         time.Time // time.Now() if not set.
 	clockTTL    bool      // decrease TTLs as the clock advances
 	lastTick    time.Time // last time TTLs were advanced, if clockTTL is set
+	txNow       time.Time // fixed logical time while EXEC runs, if not zero.
 	subscribers map[*Subscriber]struct{}
 	rand        *rand.Rand
 	Ctx         context.Context
@@ -536,8 +537,15 @@ func (m *Miniredis) ClockTTL(enabled bool) {
 
 // advance TTLs by the clock time elapsed since the last tick. Called with the
 // lock held on every database access, when ClockTTL is enabled.
+//
+// During EXEC the clock is frozen: TTLs don't advance and nothing expires
+// halfway through a transaction. The next tick after EXEC still advances by
+// the real elapsed time, so expiring keys isn't lost.
 func (m *Miniredis) tickLocked() {
 	if !m.clockTTL {
+		return
+	}
+	if !m.txNow.IsZero() {
 		return
 	}
 	now := m.effectiveNow()
@@ -821,7 +829,7 @@ func (m *Miniredis) at(i int64, d time.Duration) time.Duration {
 	default:
 		panic("invalid time unit (d). Fixme!")
 	}
-	now := m.effectiveNow()
+	now := m.txNowLocked()
 	return ts.Sub(now)
 }
 

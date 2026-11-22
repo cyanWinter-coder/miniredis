@@ -62,7 +62,9 @@ func (m *Miniredis) cmdExec(c *server.Peer, cmd string, args []string) {
 	m.Lock()
 	defer m.Unlock()
 
-	// Check WATCHed keys.
+	// Check WATCHed keys. The versions the transaction commits at are the
+	// same ones this check compares against: a command that fails inside the
+	// transaction is rolled back without touching them.
 	for t, version := range ctx.watch {
 		if m.db(t.db).keyVersion[t.key] > version {
 			// Abort! Abort!
@@ -72,10 +74,9 @@ func (m *Miniredis) cmdExec(c *server.Peer, cmd string, args []string) {
 		}
 	}
 
-	c.WriteLen(len(ctx.transaction))
-	for _, cb := range ctx.transaction {
-		cb(c, ctx)
-	}
+	// Run the queued commands. Every command is atomic: one that fails is
+	// undone, and doesn't signal any change.
+	m.executeTx(c, ctx)
 	// wake up anyone who waits on anything.
 	m.signal.Broadcast()
 

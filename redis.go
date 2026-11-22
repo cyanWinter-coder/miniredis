@@ -126,6 +126,173 @@ func withTx(
 	m.Unlock()
 }
 
+// txNowLocked returns the logical time the current transaction runs at. During
+// an EXEC every command sees the time EXEC started at, so a key's visibility
+// can't change halfway through a transaction. Outside a transaction it is the
+// current time.
+func (m *Miniredis) txNowLocked() time.Time {
+	if !m.txNow.IsZero() {
+		return m.txNow
+	}
+	return m.effectiveNow()
+}
+
+// executeTx runs the queued commands of an EXEC. Every command gets a
+// savepoint: it works on the real databases, but the state before it ran is
+// kept, and a command which ends with an error is undone in full -- its writes,
+// TTL changes and key versions -- so only its error reply remains. A failed
+// command therefore doesn't leave a partial write behind, and doesn't advance
+// the version which WATCH observes.
+//
+// All commands run at one fixed logical time (see txNowLocked), so a key can't
+// expire halfway through, and the key versions which WATCH compared against are
+// the same versions the committed result gets.
+func (m *Miniredis) executeTx(c *server.Peer, ctx *connCtx) {
+	// Apply expiry which is due before the transaction starts, then freeze the
+	// logical time for the rest of it.
+	m.tickLocked()
+	m.txNow = m.effectiveNow()
+	defer func() { m.txNow = time.Time{} }()
+
+	c.WriteLen(len(ctx.transaction))
+	for _, cmd := range ctx.transaction {
+		snap := snapshotDBs(m.dbs)
+		c.ResetError()
+		cmd(c, ctx)
+		// A command which wrote an error has failed, and has to be undone
+		// (including the key versions it bumped).
+		if c.Failed() {
+			m.restoreSnapshot(snap)
+		}
+	}
+}
+
+// dbSnapshotState holds the state of all databases at some instant during EXEC.
+// The entries are keyed by the database itself, not by its current id, so a
+// SWAPDB inside the transaction doesn't make the restore put the contents in
+// the wrong place.
+type dbSnapshotState struct {
+	entries []*dbSnapshotEntry
+	ids     map[*RedisDB]int
+}
+
+type dbSnapshotEntry struct {
+	db    *RedisDB
+	clone *RedisDB
+}
+
+// dbSnapshot records the current state of all databases, and which id each of
+// them is stored under.
+func snapshotDBs(dbs map[int]*RedisDB) *dbSnapshotState {
+	snap := &dbSnapshotState{
+		entries: make([]*dbSnapshotEntry, 0, len(dbs)),
+		ids:     make(map[*RedisDB]int, len(dbs)),
+	}
+	for id, db := range dbs {
+		snap.entries = append(snap.entries, &dbSnapshotEntry{db: db, clone: db.clone()})
+		snap.ids[db] = id
+	}
+	return snap
+}
+
+// restoreSnapshot puts every database back the way it was, including its place
+// in the id map (undoing a SWAPDB) and its values, TTLs and key versions. The
+// databases are restored in place, so pointers to them stay valid, and any
+// database created since the snapshot is dropped.
+func (m *Miniredis) restoreSnapshot(snap *dbSnapshotState) {
+	dbs := make(map[int]*RedisDB, len(snap.entries))
+	for _, e := range snap.entries {
+		id := snap.ids[e.db]
+		dbs[id] = e.db
+		e.db.id = id
+		e.db.restoreFrom(e.clone)
+	}
+	m.dbs = dbs
+}
+
+// restoreFrom makes db the same as other, in place.
+func (db *RedisDB) restoreFrom(other *RedisDB) {
+	db.keys = other.keys
+	db.stringKeys = other.stringKeys
+	db.hashKeys = other.hashKeys
+	db.listKeys = other.listKeys
+	db.setKeys = other.setKeys
+	db.hllKeys = other.hllKeys
+	db.sortedsetKeys = other.sortedsetKeys
+	db.streamKeys = other.streamKeys
+	db.ttl = other.ttl
+	db.hashTTLs = other.hashTTLs
+	db.lru = other.lru
+	db.keyVersion = other.keyVersion
+	// A stream's groups hold a backreference to the stream.
+	for _, s := range db.streamKeys {
+		for _, g := range s.groups {
+			g.stream = s
+		}
+	}
+}
+
+// clone gives a deep copy of a database.
+func (db *RedisDB) clone() *RedisDB {
+	cpy := &RedisDB{
+		master:        db.master,
+		id:            db.id,
+		keys:          make(map[string]string, len(db.keys)),
+		stringKeys:    make(map[string]string, len(db.stringKeys)),
+		hashKeys:      make(map[string]hashKey, len(db.hashKeys)),
+		listKeys:      make(map[string]listKey, len(db.listKeys)),
+		setKeys:       make(map[string]setKey, len(db.setKeys)),
+		hllKeys:       make(map[string]*hll, len(db.hllKeys)),
+		sortedsetKeys: make(map[string]sortedSet, len(db.sortedsetKeys)),
+		streamKeys:    make(map[string]*streamKey, len(db.streamKeys)),
+		ttl:           make(map[string]time.Duration, len(db.ttl)),
+		hashTTLs:      make(map[string]map[string]time.Duration, len(db.hashTTLs)),
+		lru:           make(map[string]time.Time, len(db.lru)),
+		keyVersion:    make(map[string]uint, len(db.keyVersion)),
+	}
+	for k, v := range db.keys {
+		cpy.keys[k] = v
+	}
+	for k, v := range db.stringKeys {
+		cpy.stringKeys[k] = v
+	}
+	for k, v := range db.hashKeys {
+		cpy.hashKeys[k] = copyHashKey(v)
+	}
+	for k, v := range db.listKeys {
+		cpy.listKeys[k] = copyListKey(v)
+	}
+	for k, v := range db.setKeys {
+		cpy.setKeys[k] = copySetKey(v)
+	}
+	for k, v := range db.hllKeys {
+		cpy.hllKeys[k] = v.copy()
+	}
+	for k, v := range db.sortedsetKeys {
+		cpy.sortedsetKeys[k] = copySortedSet(v)
+	}
+	for k, v := range db.streamKeys {
+		cpy.streamKeys[k] = v.copy()
+	}
+	for k, v := range db.ttl {
+		cpy.ttl[k] = v
+	}
+	for k, v := range db.hashTTLs {
+		fields := make(map[string]time.Duration, len(v))
+		for f, ttl := range v {
+			fields[f] = ttl
+		}
+		cpy.hashTTLs[k] = fields
+	}
+	for k, v := range db.lru {
+		cpy.lru[k] = v
+	}
+	for k, v := range db.keyVersion {
+		cpy.keyVersion[k] = v
+	}
+	return cpy
+}
+
 // blockCmd is executed returns whether it is done
 type blockCmd func(*server.Peer, *connCtx) bool
 

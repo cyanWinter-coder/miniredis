@@ -190,7 +190,7 @@ func (m *Miniredis) makeCmdExpireTime(timeResultStrategy func(time.Time) int64) 
 				return
 			}
 
-			c.WriteInt64(timeResultStrategy(m.effectiveNow().Add(ttl)))
+			c.WriteInt64(timeResultStrategy(m.txNowLocked().Add(ttl)))
 		})
 	}
 }
@@ -576,14 +576,21 @@ func (m *Miniredis) cmdRestore(c *server.Peer, cmd string, args []string) {
 			return
 		}
 
-		db.stringSet(opts.key, opts.serializedValue)
-
+		// Parse the TTL before touching the key, so an invalid one leaves the
+		// database alone.
+		newTTL := time.Duration(0)
 		if ttl != 0 {
 			if opts.absTtl {
-				db.ttl[opts.key] = m.at(int64(ttl), time.Millisecond)
+				newTTL = m.at(int64(ttl), time.Millisecond)
 			} else {
-				db.ttl[opts.key] = time.Duration(ttl) * time.Millisecond
+				newTTL = time.Duration(ttl) * time.Millisecond
 			}
+		}
+
+		db.del(opts.key, true)
+		db.stringSet(opts.key, opts.serializedValue)
+		if ttl != 0 {
+			db.ttl[opts.key] = newTTL
 		}
 
 		c.WriteOK()
